@@ -1,0 +1,1910 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Lince — Asistente de priorización clínica</title>
+<meta name="description" content="Asistente inteligente para la priorización y seguimiento de pacientes" />
+
+<!-- Tailwind via CDN (modo sin build) -->
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- React 18 + Babel standalone (sin build) -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Tipografía -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+<style>
+  :root {
+    --paper: #FAF7F0;
+    --paper-2: #F2EDE0;
+    --ink: #15212B;
+    --ink-2: #3A4A55;
+    --ink-3: #6B7882;
+    --line: #E2D9C4;
+    --line-2: #CABF9F;
+    --primary: #0E2A3A;
+    --accent: #C2410C;     /* rojo terracota */
+    --accent-2: #B7853A;   /* ámbar */
+    --sage: #4F7A5E;
+    --high-bg: #FCEAE3;
+    --high-fg: #9A2B0E;
+    --med-bg: #FBF1DC;
+    --med-fg: #8A6320;
+    --low-bg: #E6EFE6;
+    --low-fg: #335E42;
+  }
+  html, body { background: var(--paper); color: var(--ink); }
+  body { font-family: 'IBM Plex Sans', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  .font-display { font-family: 'Fraunces', Georgia, serif; font-optical-sizing: auto; }
+  .font-mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+  .grain {
+    background-image:
+      radial-gradient(rgba(21,33,43,0.035) 1px, transparent 1px),
+      radial-gradient(rgba(21,33,43,0.025) 1px, transparent 1px);
+    background-size: 4px 4px, 7px 7px;
+    background-position: 0 0, 2px 3px;
+  }
+  .ruled {
+    background-image: linear-gradient(to bottom, transparent calc(100% - 1px), var(--line) 100%);
+    background-size: 100% 32px;
+  }
+  .hairline { border-color: var(--line); }
+  .hairline-strong { border-color: var(--line-2); }
+  .scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+  .scrollbar::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 4px; }
+  .scrollbar::-webkit-scrollbar-track { background: transparent; }
+  .fade-in { animation: fade .35s ease-out both; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px);} to { opacity: 1; transform: none;} }
+  .pill { letter-spacing: 0.04em; text-transform: uppercase; font-size: 10px; font-weight: 600; }
+  input, select, textarea { font-family: inherit; }
+  input:focus, select:focus, textarea:focus { outline: none; box-shadow: 0 0 0 3px rgba(14,42,58,.12); border-color: var(--primary) !important; }
+  .btn-primary { background: var(--primary); color: #FAF7F0; }
+  .btn-primary:hover { background: #0a1f2c; }
+  .btn-ghost:hover { background: var(--paper-2); }
+  .number-display { font-feature-settings: "tnum"; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, useRef } = React;
+
+// ============================================================
+// 1. MODELO DE PRIORIZACIÓN — Sistema basado en reglas
+//    Pedagógicamente transparente: cada regla aporta un peso fijo.
+//    Esto permite mostrar al profesional QUÉ ha contado y CUÁNTO.
+// ============================================================
+
+const RULES = [
+  // Demográficas
+  { id: 'edad_75',  label: 'Edad ≥ 75 años',                   weight: 20, category: 'Demográfico', test: p => p.edad >= 75 },
+  { id: 'edad_65',  label: 'Edad 65–74 años',                  weight: 10, category: 'Demográfico', test: p => p.edad >= 65 && p.edad < 75 },
+  { id: 'edad_50',  label: 'Edad 50–64 años',                  weight: 5,  category: 'Demográfico', test: p => p.edad >= 50 && p.edad < 65 },
+
+  // Comorbilidades
+  { id: 'ic',       label: 'Insuficiencia cardíaca',           weight: 18, category: 'Comorbilidad', test: p => p.patologias.includes('IC') },
+  { id: 'erc',      label: 'Enfermedad renal crónica',         weight: 15, category: 'Comorbilidad', test: p => p.patologias.includes('ERC') },
+  { id: 'epoc',     label: 'EPOC',                             weight: 12, category: 'Comorbilidad', test: p => p.patologias.includes('EPOC') },
+  { id: 'dm',       label: 'Diabetes mellitus',                weight: 10, category: 'Comorbilidad', test: p => p.patologias.includes('DM') },
+  { id: 'hta',      label: 'Hipertensión arterial',            weight: 8,  category: 'Comorbilidad', test: p => p.patologias.includes('HTA') },
+
+  // Asistenciales
+  { id: 'hosp',     label: 'Hospitalización en últimos 12 meses', weight: 20, category: 'Histórico', test: p => p.hospitalizacion12m },
+  { id: 'urg',      label: 'Visita a urgencias en últimos 6 meses', weight: 15, category: 'Histórico', test: p => p.urgencias6m },
+  { id: 'sin_revision', label: '> 180 días sin revisión',       weight: 10, category: 'Histórico', test: p => p.diasUltimaRevision > 180 },
+
+  // Manejo
+  { id: 'polifarmacia', label: 'Polifarmacia (> 5 fármacos)',   weight: 10, category: 'Manejo',     test: p => p.numFarmacos > 5 },
+  { id: 'adherencia',   label: 'Mala adherencia al tratamiento',weight: 12, category: 'Manejo',     test: p => p.adherencia === 'baja' },
+
+  // Clínicos actuales
+  { id: 'sintomas', label: 'Síntomas activos reportados',      weight: 15, category: 'Clínico',     test: p => p.sintomasActivos },
+  { id: 'constantes', label: 'Constantes/analítica fuera de rango', weight: 15, category: 'Clínico', test: p => p.constantesAnormales },
+];
+
+const THRESHOLDS = { alto: 70, medio: 35 };
+
+function calculateRisk(patient) {
+  const triggered = RULES.filter(r => r.test(patient));
+  const score = triggered.reduce((s, r) => s + r.weight, 0);
+  const maxScore = RULES.reduce((s, r) => s + r.weight, 0);
+  const level = score >= THRESHOLDS.alto ? 'alto' : score >= THRESHOLDS.medio ? 'medio' : 'bajo';
+  return { score, maxScore, level, factors: triggered };
+}
+
+function getRecommendation(level, patient) {
+  if (level === 'alto') {
+    return {
+      accion: 'Cita presencial en 24–48 h',
+      icono: 'urgent',
+      detalle: 'Riesgo elevado de descompensación. Valorar revisión clínica completa, ajuste terapéutico y educación al paciente y familia.',
+      tag: 'Prioritario'
+    };
+  }
+  if (level === 'medio') {
+    return {
+      accion: 'Revisión telefónica programada (5–7 días)',
+      icono: 'phone',
+      detalle: 'Confirmar adherencia, sintomatología y necesidad de cita presencial. Reevaluar a las 2 semanas.',
+      tag: 'Seguimiento activo'
+    };
+  }
+  return {
+    accion: 'Seguimiento estándar según protocolo',
+    icono: 'calendar',
+    detalle: 'Mantener pauta de revisión habitual. Revaluar si aparecen nuevos síntomas o cambios en constantes.',
+    tag: 'Estándar'
+  };
+}
+
+// ============================================================
+// 1.bis MODELO DE IA — Regresión logística entrenada en cliente
+//       Complementa al sistema de reglas con un modelo estadístico.
+//       Entrenamiento: gradient descent + regularización L2 sobre
+//       un dataset sintético generado con outcome conocido.
+// ============================================================
+
+const FEATURE_NAMES = [
+  'Edad (norm)', 'Nº comorbilidades', 'Nº fármacos',
+  'Hosp. 12m', 'Urgencias 6m',
+  'Adherencia baja', 'Adherencia media',
+  'Síntomas activos', 'Constantes anormales',
+  'Días sin revisión (norm)',
+  'Tiene IC', 'Tiene ERC', 'Tiene EPOC', 'Tiene DM',
+];
+
+function vectorize(p) {
+  return [
+    Math.min(p.edad / 100, 1),
+    p.patologias.length,
+    p.numFarmacos,
+    p.hospitalizacion12m ? 1 : 0,
+    p.urgencias6m ? 1 : 0,
+    p.adherencia === 'baja'  ? 1 : 0,
+    p.adherencia === 'media' ? 1 : 0,
+    p.sintomasActivos ? 1 : 0,
+    p.constantesAnormales ? 1 : 0,
+    Math.min(p.diasUltimaRevision / 365, 2),
+    p.patologias.includes('IC')   ? 1 : 0,
+    p.patologias.includes('ERC')  ? 1 : 0,
+    p.patologias.includes('EPOC') ? 1 : 0,
+    p.patologias.includes('DM')   ? 1 : 0,
+  ];
+}
+
+// PRNG determinista (Mulberry32) para reproducibilidad de la demo
+function mulberry32(seed) {
+  return function() {
+    let t = seed += 0x6D2B79F5;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Generador sintético: pacientes con outcome (descompensación a 90d)
+// modelado con un proceso de Bernoulli a partir de una logit latente.
+function generateSyntheticDataset(n) {
+  const rnd = mulberry32(42);
+  const data = [];
+  const allPat = ['HTA','DM','EPOC','IC','ERC','Asma','Obesidad','Depresión'];
+  for (let i = 0; i < n; i++) {
+    const edad = Math.floor(20 + rnd() * 75);
+    const numPat = Math.min(8, Math.floor(rnd() * (edad > 60 ? 5 : 2.5)));
+    const patologias = [];
+    while (patologias.length < numPat) {
+      const c = allPat[Math.floor(rnd() * allPat.length)];
+      if (!patologias.includes(c)) patologias.push(c);
+    }
+    const p = {
+      edad, patologias,
+      numFarmacos: Math.min(15, numPat + Math.floor(rnd() * 4)),
+      hospitalizacion12m: rnd() < (0.05 + numPat * 0.06),
+      urgencias6m:        rnd() < (0.08 + numPat * 0.05),
+      adherencia: rnd() < 0.65 ? 'alta' : (rnd() < 0.7 ? 'media' : 'baja'),
+      sintomasActivos:     rnd() < (0.10 + numPat * 0.07),
+      constantesAnormales: rnd() < (0.10 + numPat * 0.06),
+      diasUltimaRevision:  Math.floor(rnd() * 600),
+    };
+    let z = -3.5
+      + 0.04 * p.edad
+      + 0.50 * p.patologias.length
+      + 0.10 * p.numFarmacos
+      + 1.70 * (p.hospitalizacion12m ? 1 : 0)
+      + 1.10 * (p.urgencias6m ? 1 : 0)
+      + 0.90 * (p.adherencia === 'baja' ? 1 : 0)
+      + 1.40 * (p.sintomasActivos ? 1 : 0)
+      + 1.20 * (p.constantesAnormales ? 1 : 0)
+      + 1.00 * (p.patologias.includes('IC')  ? 1 : 0)
+      + 0.80 * (p.patologias.includes('ERC') ? 1 : 0);
+    const prob = 1 / (1 + Math.exp(-z));
+    const y = rnd() < prob ? 1 : 0;
+    data.push({ x: vectorize(p), y });
+  }
+  return data;
+}
+
+// Regresión logística por descenso de gradiente con L2
+function trainLogisticRegression(dataset, opts = {}) {
+  const epochs = opts.epochs ?? 250;
+  const lr     = opts.lr     ?? 0.15;
+  const lambda = opts.lambda ?? 0.005;
+  const n = dataset.length;
+  const d = dataset[0].x.length;
+  let w = new Array(d).fill(0);
+  let b = 0;
+  const lossHistory = [];
+  const sigmoid = z => 1 / (1 + Math.exp(-z));
+
+  for (let e = 0; e < epochs; e++) {
+    const dw = new Array(d).fill(0);
+    let db = 0, loss = 0;
+    for (let i = 0; i < n; i++) {
+      const { x, y } = dataset[i];
+      let z = b;
+      for (let j = 0; j < d; j++) z += w[j] * x[j];
+      const p = sigmoid(z);
+      const err = p - y;
+      for (let j = 0; j < d; j++) dw[j] += err * x[j];
+      db += err;
+      const eps = 1e-15;
+      loss += -(y * Math.log(p + eps) + (1 - y) * Math.log(1 - p + eps));
+    }
+    for (let j = 0; j < d; j++) w[j] -= lr * (dw[j] / n + lambda * w[j]);
+    b -= lr * (db / n);
+    lossHistory.push(loss / n);
+  }
+  return { w, b, lossHistory, epochs };
+}
+
+function predictProb(model, x) {
+  let z = model.b;
+  for (let j = 0; j < x.length; j++) z += model.w[j] * x[j];
+  return 1 / (1 + Math.exp(-z));
+}
+
+// Online learning: un paso de SGD sobre un único ejemplo (x, y).
+// Se aplica tras cada decisión humana clara. lr bajo para evitar que
+// pocas decisiones distorsionen el modelo entrenado offline.
+function onlineUpdate(model, x, y, opts = {}) {
+  const lr = opts.lr ?? 0.02;
+  const lambda = opts.lambda ?? 0.005;
+  let z = model.b;
+  for (let j = 0; j < x.length; j++) z += model.w[j] * x[j];
+  const p = 1 / (1 + Math.exp(-z));
+  const err = p - y;
+  const newW = model.w.map((wj, j) => wj - lr * (err * x[j] + lambda * wj));
+  const newB = model.b - lr * err;
+  return { ...model, w: newW, b: newB };
+}
+
+// Deriva el outcome implícito de una decisión profesional.
+// Solo emite señal cuando la decisión es interpretable sin ambigüedad.
+function deriveImplicitOutcome(decisionType, ruleLevel) {
+  if (decisionType === 'confirmada') {
+    if (ruleLevel === 'alto') return 1; // modelo acertó al priorizar
+    if (ruleLevel === 'bajo') return 0; // modelo acertó al no priorizar
+  }
+  if (decisionType === 'descartada') {
+    if (ruleLevel === 'alto') return 0; // modelo sobrepriorizó
+  }
+  // 'medio' confirmado, 'modificada' o cualquier otra combinación: señal ambigua
+  return null;
+}
+
+// AUC ROC vía Mann–Whitney U
+function computeAUC(model, dataset) {
+  const probs = dataset.map(d => ({ p: predictProb(model, d.x), y: d.y }));
+  const pos = probs.filter(d => d.y === 1).map(d => d.p);
+  const neg = probs.filter(d => d.y === 0).map(d => d.p);
+  if (!pos.length || !neg.length) return 0.5;
+  let wins = 0;
+  for (const a of pos) for (const c of neg) {
+    if (a > c) wins++; else if (a === c) wins += 0.5;
+  }
+  return wins / (pos.length * neg.length);
+}
+
+// Conversión P(90d) → P(t días) asumiendo hazard constante
+function temporalProbability(p90, days) {
+  const H = -Math.log(Math.max(1e-6, 1 - p90)) / 90;
+  return 1 - Math.exp(-H * days);
+}
+
+// ============================================================
+// 1.ter NLP — Análisis ligero de notas clínicas
+// ============================================================
+
+const CLINICAL_TERMS = {
+  alto:  { weight: 3, color:'var(--high-fg)', bg:'var(--high-bg)', terms:['disnea','edemas','dolor torácico','síncope','exacerbación','descompensación','agudización','crisis','sangrado','convulsión','ictus','trombosis','sepsis','deterioro'] },
+  medio: { weight: 2, color:'var(--med-fg)',  bg:'var(--med-bg)',  terms:['tos persistente','tos productiva','astenia','fatiga','vértigo','mareo','glucemia elevada','hba1c','creatinina','fibrilación','arritmia','olvida','al alza','persistente'] },
+  bajo:  { weight:-1, color:'var(--low-fg)',  bg:'var(--low-bg)',  terms:['estable','controlado','sin agudizaciones','asintomático','rutina','preventiva'] },
+};
+
+function analyzeNotes(text) {
+  if (!text) return { score: 0, hits: [] };
+  const norm = text.toLowerCase();
+  const hits = [];
+  let score = 0;
+  Object.entries(CLINICAL_TERMS).forEach(([severity, data]) => {
+    data.terms.forEach(term => {
+      let from = 0;
+      while (true) {
+        const idx = norm.indexOf(term, from);
+        if (idx === -1) break;
+        hits.push({ term, severity, weight: data.weight, start: idx, end: idx + term.length });
+        score += data.weight;
+        from = idx + term.length;
+      }
+    });
+  });
+  return { score: Math.max(0, score), hits: hits.sort((a,b) => a.start - b.start) };
+}
+
+// ============================================================
+// 1.quater kNN — Similaridad por distancia euclídea
+// ============================================================
+
+function euclideanDistance(a, b) {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += (a[i] - b[i]) ** 2;
+  return Math.sqrt(s);
+}
+
+function findSimilarPatients(target, cohort, k = 3) {
+  const tv = vectorize(target);
+  return cohort
+    .filter(p => p.id !== target.id)
+    .map(p => ({ patient: p, distance: euclideanDistance(tv, vectorize(p)) }))
+    .sort((a,b) => a.distance - b.distance)
+    .slice(0, k);
+}
+
+// ============================================================
+// 1.quinquies STORAGE — Persistencia local (localStorage)
+//   Versionado por clave para futuras migraciones.
+//   Falla silenciosamente: si el navegador bloquea localStorage
+//   (modo privado estricto, cuotas) la app sigue funcionando en RAM.
+// ============================================================
+
+const Storage = {
+  PATIENTS_KEY:    'lince:patients:v1',
+  ADAPTATIONS_KEY: 'lince:adaptations:v1',
+
+  loadPatients() {
+    try {
+      const raw = localStorage.getItem(this.PATIENTS_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+    } catch (e) { return null; }
+  },
+  savePatients(patients) {
+    try { localStorage.setItem(this.PATIENTS_KEY, JSON.stringify(patients)); }
+    catch (e) { console.warn('Storage.savePatients:', e); }
+  },
+  loadAdaptations() {
+    try {
+      const raw = localStorage.getItem(this.ADAPTATIONS_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) { return []; }
+  },
+  saveAdaptations(adaptations) {
+    try { localStorage.setItem(this.ADAPTATIONS_KEY, JSON.stringify(adaptations)); }
+    catch (e) { console.warn('Storage.saveAdaptations:', e); }
+  },
+  clearAll() {
+    try {
+      localStorage.removeItem(this.PATIENTS_KEY);
+      localStorage.removeItem(this.ADAPTATIONS_KEY);
+    } catch (e) {}
+  },
+  isAvailable() {
+    try {
+      const k = '__lince_test__';
+      localStorage.setItem(k, '1');
+      localStorage.removeItem(k);
+      return true;
+    } catch (e) { return false; }
+  }
+};
+
+// ============================================================
+// 2. DATOS MOCK — Pacientes ficticios con perfiles variados
+// ============================================================
+
+const PATOLOGIAS_DISPONIBLES = ['HTA', 'DM', 'EPOC', 'IC', 'ERC', 'Asma', 'Obesidad', 'Depresión'];
+
+const SEED_PATIENTS = [
+  { id:'P001', nombre:'María Casado Pérez', edad:78, sexo:'F', patologias:['HTA','IC','DM'], numFarmacos:8, urgencias6m:true,  hospitalizacion12m:true,  adherencia:'baja',   diasUltimaRevision:45,  sintomasActivos:true,  constantesAnormales:true,  notas:'Disnea creciente, edemas MMII.', decision:null, historial:[] },
+  { id:'P002', nombre:'Joaquín Vergara Ruiz', edad:67, sexo:'M', patologias:['EPOC','HTA'],   numFarmacos:6, urgencias6m:true,  hospitalizacion12m:false, adherencia:'media',  diasUltimaRevision:120, sintomasActivos:true,  constantesAnormales:false, notas:'Tos productiva persistente.', decision:null, historial:[] },
+  { id:'P003', nombre:'Lorena Tejada Solà',   edad:54, sexo:'F', patologias:['DM','Obesidad'],numFarmacos:3, urgencias6m:false, hospitalizacion12m:false, adherencia:'alta',   diasUltimaRevision:200, sintomasActivos:false, constantesAnormales:true,  notas:'HbA1c última 8.4%.', decision:null, historial:[] },
+  { id:'P004', nombre:'Antonio Llopis Marín', edad:82, sexo:'M', patologias:['IC','ERC','HTA','DM'], numFarmacos:11, urgencias6m:true, hospitalizacion12m:true, adherencia:'baja', diasUltimaRevision:30, sintomasActivos:true, constantesAnormales:true, notas:'FA, función renal en deterioro.', decision:null, historial:[] },
+  { id:'P005', nombre:'Carmen Aguilar Vega',  edad:61, sexo:'F', patologias:['HTA'],          numFarmacos:2, urgencias6m:false, hospitalizacion12m:false, adherencia:'alta',   diasUltimaRevision:90,  sintomasActivos:false, constantesAnormales:false, notas:'Estable.', decision:null, historial:[] },
+  { id:'P006', nombre:'Iván Pereda Olmos',    edad:43, sexo:'M', patologias:['Asma'],         numFarmacos:2, urgencias6m:false, hospitalizacion12m:false, adherencia:'alta',   diasUltimaRevision:280, sintomasActivos:false, constantesAnormales:false, notas:'Sin agudizaciones.', decision:null, historial:[] },
+  { id:'P007', nombre:'Pilar Romero Iglesias',edad:71, sexo:'F', patologias:['DM','HTA','Depresión'], numFarmacos:7, urgencias6m:false, hospitalizacion12m:false, adherencia:'media', diasUltimaRevision:160, sintomasActivos:false, constantesAnormales:true, notas:'Refiere astenia.', decision:null, historial:[] },
+  { id:'P008', nombre:'Ramón Estévez Coll',   edad:69, sexo:'M', patologias:['EPOC','IC'],    numFarmacos:9, urgencias6m:true,  hospitalizacion12m:false, adherencia:'media',  diasUltimaRevision:75,  sintomasActivos:true,  constantesAnormales:true,  notas:'Exacerbación reciente.', decision:null, historial:[] },
+  { id:'P009', nombre:'Nuria Aldea Beltrán',  edad:38, sexo:'F', patologias:[],               numFarmacos:1, urgencias6m:false, hospitalizacion12m:false, adherencia:'alta',   diasUltimaRevision:365, sintomasActivos:false, constantesAnormales:false, notas:'Revisión preventiva.', decision:null, historial:[] },
+  { id:'P010', nombre:'Salvador Marín Aroca', edad:75, sexo:'M', patologias:['HTA','DM','ERC'], numFarmacos:9, urgencias6m:false, hospitalizacion12m:false, adherencia:'alta', diasUltimaRevision:60, sintomasActivos:false, constantesAnormales:true, notas:'Creatinina al alza.', decision:null, historial:[] },
+  { id:'P011', nombre:'Beatriz Soler Núñez',  edad:58, sexo:'F', patologias:['Obesidad','HTA'], numFarmacos:3, urgencias6m:false, hospitalizacion12m:false, adherencia:'media', diasUltimaRevision:210, sintomasActivos:false, constantesAnormales:false, notas:'TAS 145.', decision:null, historial:[] },
+  { id:'P012', nombre:'Eduardo Fonseca Vila', edad:66, sexo:'M', patologias:['DM','Depresión'], numFarmacos:5, urgencias6m:false, hospitalizacion12m:false, adherencia:'baja', diasUltimaRevision:240, sintomasActivos:true, constantesAnormales:false, notas:'Olvida glucemias.', decision:null, historial:[] },
+];
+
+// ============================================================
+// 3. UTILIDADES
+// ============================================================
+
+function fmtDate(d) {
+  return new Date(d).toLocaleString('es-ES', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+}
+function levelMeta(level) {
+  if (level === 'alto')  return { label:'Riesgo alto',  bg:'var(--high-bg)', fg:'var(--high-fg)', dot:'#9A2B0E' };
+  if (level === 'medio') return { label:'Riesgo medio', bg:'var(--med-bg)',  fg:'var(--med-fg)',  dot:'#B7853A' };
+  return                       { label:'Riesgo bajo',   bg:'var(--low-bg)',  fg:'var(--low-fg)',  dot:'#4F7A5E' };
+}
+const cls = (...xs) => xs.filter(Boolean).join(' ');
+
+// ============================================================
+// 4. ICONOS SVG (inline, sin dependencias)
+// ============================================================
+
+const Icon = {
+  Dash: (p) => <svg {...p} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>,
+  Users:(p) => <svg {...p} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+  Plus: (p) => <svg {...p} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+  Check:(p) => <svg {...p} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>,
+  X:    (p) => <svg {...p} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+  Edit: (p) => <svg {...p} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
+  Search:(p)=> <svg {...p} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>,
+  Phone:(p) => <svg {...p} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92V21a1 1 0 0 1-1.09 1A19.86 19.86 0 0 1 2 3.09 1 1 0 0 1 3 2h4.09a1 1 0 0 1 1 .75c.12.86.31 1.7.57 2.5a1 1 0 0 1-.23 1L7 7.91a16 16 0 0 0 6 6l1.66-1.66a1 1 0 0 1 1-.23c.8.26 1.64.45 2.5.57a1 1 0 0 1 .84 1z"/></svg>,
+  Cal:  (p) => <svg {...p} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
+  Bolt: (p) => <svg {...p} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>,
+  Info: (p) => <svg {...p} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>,
+  Arrow:(p) => <svg {...p} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>,
+  Brain:(p) => <svg {...p} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5a3 3 0 1 0-5.997.142 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.142 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v13"/></svg>,
+  Spark:(p) => <svg {...p} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg>,
+  Pulse:(p) => <svg {...p} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>,
+  Layers:(p) => <svg {...p} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>,
+};
+
+// ============================================================
+// 5. COMPONENTES UI ATÓMICOS
+// ============================================================
+
+function RiskBadge({ level, size='sm' }) {
+  const m = levelMeta(level);
+  const padding = size === 'lg' ? 'px-3 py-1.5 text-xs' : 'px-2 py-0.5 text-[11px]';
+  return (
+    <span className={cls('inline-flex items-center gap-1.5 rounded-full font-semibold', padding)}
+          style={{ background: m.bg, color: m.fg }}>
+      <span className="w-1.5 h-1.5 rounded-full" style={{ background: m.dot }} />
+      {m.label}
+    </span>
+  );
+}
+
+function Field({ label, children, hint }) {
+  return (
+    <label className="block">
+      <div className="text-[11px] uppercase tracking-wider font-semibold text-[var(--ink-3)] mb-1.5">{label}</div>
+      {children}
+      {hint && <div className="text-xs text-[var(--ink-3)] mt-1">{hint}</div>}
+    </label>
+  );
+}
+
+function Toggle({ checked, onChange, label }) {
+  return (
+    <button type="button" onClick={() => onChange(!checked)}
+      className="flex items-center gap-3 w-full text-left p-3 border hairline rounded-md hover:bg-[var(--paper-2)] transition">
+      <span className={cls('relative w-9 h-5 rounded-full transition', checked ? 'bg-[var(--primary)]' : 'bg-[var(--line-2)]')}>
+        <span className={cls('absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition', checked && 'translate-x-4')}/>
+      </span>
+      <span className="text-sm">{label}</span>
+    </button>
+  );
+}
+
+// ============================================================
+// 6. SIDEBAR + LAYOUT
+// ============================================================
+
+function Sidebar({ view, setView, counts, onReset }) {
+  const items = [
+    { id:'dashboard', label:'Panel general',     icon:<Icon.Dash/>,  badge: null },
+    { id:'patients',  label:'Pacientes',         icon:<Icon.Users/>, badge: counts.total },
+    { id:'new',       label:'Nuevo paciente',    icon:<Icon.Plus/>,  badge: null },
+    { id:'model',     label:'Acerca del modelo', icon:<Icon.Brain/>, badge: 'IA' },
+  ];
+
+  const handleReset = () => {
+    if (window.confirm('¿Restablecer todos los datos? Se perderán pacientes nuevos, decisiones y aprendizaje del modelo.')) {
+      onReset();
+    }
+  };
+
+  return (
+    <aside className="w-60 shrink-0 border-r hairline flex flex-col" style={{ background:'var(--paper-2)' }}>
+      <div className="p-5 border-b hairline">
+        <div className="flex items-baseline gap-2">
+          <span className="font-display text-2xl font-semibold tracking-tight">Lince</span>
+          <span className="text-[10px] uppercase tracking-widest text-[var(--ink-3)] font-mono">v0.3</span>
+        </div>
+        <div className="text-xs text-[var(--ink-3)] mt-0.5">Asistente de priorización clínica</div>
+      </div>
+      <nav className="p-3 flex-1">
+        {items.map(it => (
+          <button key={it.id} onClick={() => setView(it.id)}
+            className={cls('w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm mb-1 transition',
+              view === it.id ? 'bg-[var(--primary)] text-[var(--paper)]' : 'text-[var(--ink-2)] hover:bg-[var(--paper)]')}>
+            {it.icon}
+            <span className="flex-1 text-left">{it.label}</span>
+            {it.badge !== null && <span className="text-[10px] font-mono opacity-70">{it.badge}</span>}
+          </button>
+        ))}
+      </nav>
+      <div className="p-3 border-t hairline">
+        <button onClick={handleReset}
+          className="w-full text-left text-xs text-[var(--ink-3)] hover:text-[var(--high-fg)] flex items-center gap-2 px-2 py-1.5 rounded transition">
+          <Icon.X/> Restablecer datos
+        </button>
+      </div>
+      <div className="p-4 text-[11px] text-[var(--ink-3)] border-t hairline leading-relaxed">
+        Sistema de apoyo a la decisión.<br/>
+        <span className="font-semibold text-[var(--ink-2)]">No reemplaza el juicio clínico.</span>
+      </div>
+    </aside>
+  );
+}
+
+// ============================================================
+// 7. DASHBOARD AGREGADO
+// ============================================================
+
+function DonutChart({ data, total }) {
+  // SVG donut puro, sin librerías. Calculamos arcos por proporción.
+  const cx = 90, cy = 90, r = 65, sw = 24;
+  let acc = 0;
+  const arcs = data.map(d => {
+    const start = acc / total;
+    acc += d.value;
+    const end = acc / total;
+    const a0 = start * 2 * Math.PI - Math.PI / 2;
+    const a1 = end   * 2 * Math.PI - Math.PI / 2;
+    const x0 = cx + r * Math.cos(a0), y0 = cy + r * Math.sin(a0);
+    const x1 = cx + r * Math.cos(a1), y1 = cy + r * Math.sin(a1);
+    const large = (end - start) > 0.5 ? 1 : 0;
+    const path = total === 0 ? '' : `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`;
+    return { path, color: d.color };
+  });
+  return (
+    <svg viewBox="0 0 180 180" className="w-44 h-44">
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke="var(--line)" strokeWidth={sw}/>
+      {arcs.map((a, i) => a.path && (
+        <path key={i} d={a.path} fill="none" stroke={a.color} strokeWidth={sw} strokeLinecap="butt"/>
+      ))}
+      <text x={cx} y={cy-4} textAnchor="middle" className="font-display number-display" style={{ fontSize:32, fontWeight:600, fill:'var(--ink)' }}>{total}</text>
+      <text x={cx} y={cy+16} textAnchor="middle" style={{ fontSize:10, fill:'var(--ink-3)', letterSpacing:'0.1em' }}>PACIENTES</text>
+    </svg>
+  );
+}
+
+function Dashboard({ patients, scored, setView, openPatient, mlProbs, adaptations }) {
+  const dist = useMemo(() => {
+    const c = { alto:0, medio:0, bajo:0 };
+    scored.forEach(s => c[s.level]++);
+    return c;
+  }, [scored]);
+
+  const decisionStats = useMemo(() => {
+    const c = { confirmadas:0, modificadas:0, descartadas:0, pendientes:0 };
+    scored.forEach(s => {
+      if (!s.patient.decision) c.pendientes++;
+      else if (s.patient.decision.tipo === 'confirmada') c.confirmadas++;
+      else if (s.patient.decision.tipo === 'modificada') c.modificadas++;
+      else c.descartadas++;
+    });
+    return c;
+  }, [scored]);
+
+  // Métrica de validación humana: tasa de aceptación = confirmadas / decididas
+  const totalDecididas = decisionStats.confirmadas + decisionStats.modificadas + decisionStats.descartadas;
+  const tasaAceptacion = totalDecididas > 0 ? (decisionStats.confirmadas / totalDecididas) : 0;
+
+  // Comparativa reglas vs ML
+  const concordancia = useMemo(() => {
+    if (!mlProbs || Object.keys(mlProbs).length === 0) return null;
+    let acuerdo = 0, total = 0;
+    scored.forEach(s => {
+      const p = mlProbs[s.patient.id];
+      if (p === undefined) return;
+      const mlLevel = p >= 0.5 ? 'alto' : p >= 0.2 ? 'medio' : 'bajo';
+      if (mlLevel === s.level) acuerdo++;
+      total++;
+    });
+    return total > 0 ? acuerdo / total : null;
+  }, [scored, mlProbs]);
+
+  const priorizados = scored
+    .filter(s => s.level !== 'bajo')
+    .sort((a,b) => b.score - a.score)
+    .slice(0, 5);
+
+  return (
+    <div className="fade-in">
+      <header className="mb-8">
+        <div className="text-[11px] uppercase tracking-widest text-[var(--ink-3)] font-semibold mb-1">Panel general</div>
+        <h1 className="font-display text-4xl font-semibold tracking-tight">Visión global de la cohorte</h1>
+        <p className="text-[var(--ink-2)] mt-2 max-w-2xl">Resumen agregado de la situación de los pacientes activos. Use esta vista para reorganizar agendas y detectar carga prioritaria.</p>
+      </header>
+
+      {/* KPIs y donut */}
+      <div className="grid grid-cols-12 gap-4 mb-4">
+        <div className="col-span-4 border hairline bg-white rounded-md p-6 flex items-center gap-6">
+          <DonutChart total={patients.length} data={[
+            { value: dist.alto,  color:'#9A2B0E' },
+            { value: dist.medio, color:'#B7853A' },
+            { value: dist.bajo,  color:'#4F7A5E' },
+          ]}/>
+          <div className="space-y-2.5 text-sm">
+            <Legend dot="#9A2B0E" label="Alto"  value={dist.alto}/>
+            <Legend dot="#B7853A" label="Medio" value={dist.medio}/>
+            <Legend dot="#4F7A5E" label="Bajo"  value={dist.bajo}/>
+          </div>
+        </div>
+
+        <KpiCard col="col-span-2" label="Riesgo alto"  value={dist.alto}  accent="var(--high-fg)" sub="requieren acción"/>
+        <KpiCard col="col-span-2" label="Pendientes"   value={decisionStats.pendientes} accent="var(--ink)" sub="sin decisión"/>
+        <KpiCard col="col-span-2" label="Confirmadas"  value={decisionStats.confirmadas} accent="var(--sage)" sub="aceptadas"/>
+        <KpiCard col="col-span-2" label="Modificadas"  value={decisionStats.modificadas} accent="var(--accent-2)" sub="ajustadas"/>
+      </div>
+
+      {/* Métricas de validación humana y de modelo */}
+      <div className="grid grid-cols-12 gap-4 mb-8">
+        <div className="col-span-6 border hairline bg-white rounded-md p-6">
+          <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] mb-3 flex items-center gap-1.5">
+            <Icon.Pulse/> Validación humana del sistema
+          </div>
+          <div className="flex items-end justify-between mb-3">
+            <div>
+              <div className="font-display number-display text-5xl font-semibold leading-none">{(tasaAceptacion * 100).toFixed(0)}<span className="text-2xl text-[var(--ink-3)]">%</span></div>
+              <div className="text-xs text-[var(--ink-3)] mt-1">tasa de aceptación de la recomendación</div>
+            </div>
+            <div className="text-xs text-[var(--ink-3)] text-right">
+              <div>{decisionStats.confirmadas} confirmadas</div>
+              <div>{decisionStats.modificadas} modificadas · {decisionStats.descartadas} descartadas</div>
+              <div className="mt-1">{totalDecididas} de {patients.length} decididas</div>
+            </div>
+          </div>
+          <StackedBar
+            segments={[
+              { v: decisionStats.confirmadas, color:'var(--sage)',    label:'Conf.' },
+              { v: decisionStats.modificadas, color:'var(--med-fg)',  label:'Mod.'  },
+              { v: decisionStats.descartadas, color:'var(--high-fg)', label:'Desc.' },
+              { v: decisionStats.pendientes,  color:'var(--line-2)',  label:'Pend.' },
+            ]}
+            total={patients.length}
+          />
+        </div>
+
+        <div className="col-span-6 border hairline bg-white rounded-md p-6">
+          <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] mb-3 flex items-center gap-1.5">
+            <Icon.Brain/> Concordancia entre motores
+            {adaptations && adaptations.length > 0 && (
+              <span className="ml-auto text-[10px] font-mono px-2 py-0.5 rounded-full" style={{ background:'var(--accent-2)', color:'var(--paper)' }}>
+                +{adaptations.length} adapt.
+              </span>
+            )}
+          </div>
+          {concordancia === null ? (
+            <div className="text-sm text-[var(--ink-3)] flex items-center gap-2"><Icon.Spark/> Esperando al modelo…</div>
+          ) : (
+            <>
+              <div className="flex items-end justify-between mb-3">
+                <div>
+                  <div className="font-display number-display text-5xl font-semibold leading-none">{(concordancia * 100).toFixed(0)}<span className="text-2xl text-[var(--ink-3)]">%</span></div>
+                  <div className="text-xs text-[var(--ink-3)] mt-1">acuerdo reglas ↔ regresión logística</div>
+                </div>
+                <button onClick={() => setView('model')} className="text-xs font-semibold flex items-center gap-1.5 hover:underline">
+                  Ver modelo <Icon.Arrow/>
+                </button>
+              </div>
+              <div className="text-xs text-[var(--ink-2)] leading-relaxed">
+                {adaptations && adaptations.length > 0
+                  ? <>El modelo se ha adaptado <span className="font-semibold">{adaptations.length}</span> {adaptations.length === 1 ? 'vez' : 'veces'} con las decisiones registradas. Las discrepancias deberían reducirse con el uso.</>
+                  : 'Cuando ambos sistemas coinciden la confianza es alta. Las discrepancias son oportunidades para revisar reglas o reentrenar el modelo.'}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Top priorizados */}
+      <section className="border hairline bg-white rounded-md">
+        <div className="flex items-center justify-between px-6 py-4 border-b hairline">
+          <div>
+            <h2 className="font-display text-xl font-semibold">Pacientes priorizados</h2>
+            <div className="text-xs text-[var(--ink-3)] mt-0.5">Top 5 por puntuación de riesgo</div>
+          </div>
+          <button onClick={() => setView('patients')} className="text-sm font-semibold flex items-center gap-1.5 hover:underline">
+            Ver todos <Icon.Arrow/>
+          </button>
+        </div>
+        <div className="divide-y hairline">
+          {priorizados.length === 0 && (
+            <div className="px-6 py-8 text-center text-[var(--ink-3)]">No hay pacientes con riesgo medio o alto.</div>
+          )}
+          {priorizados.map(s => (
+            <PatientRow key={s.patient.id} scored={s} onClick={() => openPatient(s.patient.id)} mlProb={mlProbs && mlProbs[s.patient.id]}/>
+          ))}
+        </div>
+      </section>
+
+      <DistributionByCategory scored={scored}/>
+    </div>
+  );
+}
+
+function StackedBar({ segments, total }) {
+  if (total === 0) return <div className="h-2 rounded-full" style={{ background:'var(--paper-2)' }}/>;
+  return (
+    <div>
+      <div className="flex h-2 rounded-full overflow-hidden">
+        {segments.map((s, i) => s.v > 0 && (
+          <div key={i} style={{ width: `${(s.v/total)*100}%`, background: s.color }}/>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-3 mt-2 text-[11px] text-[var(--ink-3)]">
+        {segments.map((s, i) => (
+          <span key={i} className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-sm" style={{ background: s.color }}/>
+            {s.label} <span className="font-mono">{s.v}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Legend({ dot, label, value }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-2.5 h-2.5 rounded-full" style={{ background: dot }}/>
+      <span className="text-[var(--ink-2)] w-12">{label}</span>
+      <span className="font-mono number-display font-semibold">{value}</span>
+    </div>
+  );
+}
+
+function KpiCard({ col, label, value, accent, sub }) {
+  return (
+    <div className={cls('border hairline bg-white rounded-md p-5 flex flex-col justify-between', col)}>
+      <div className="text-[11px] uppercase tracking-widest font-semibold text-[var(--ink-3)]">{label}</div>
+      <div className="font-display number-display text-5xl font-semibold mt-3" style={{ color: accent }}>{value}</div>
+      <div className="text-xs text-[var(--ink-3)] mt-1">{sub}</div>
+    </div>
+  );
+}
+
+function DistributionByCategory({ scored }) {
+  // Cuenta cuántos pacientes tienen cada factor activo.
+  const counts = RULES.map(r => ({
+    rule: r,
+    n: scored.filter(s => s.factors.find(f => f.id === r.id)).length,
+  })).sort((a,b) => b.n - a.n).slice(0, 10);
+
+  const max = Math.max(1, ...counts.map(c => c.n));
+
+  return (
+    <section className="mt-8 border hairline bg-white rounded-md">
+      <div className="px-6 py-4 border-b hairline">
+        <h2 className="font-display text-xl font-semibold">Factores más prevalentes</h2>
+        <div className="text-xs text-[var(--ink-3)] mt-0.5">Frecuencia de cada regla disparada en la cohorte</div>
+      </div>
+      <div className="p-6 space-y-2.5">
+        {counts.map(c => (
+          <div key={c.rule.id} className="flex items-center gap-4">
+            <div className="w-72 text-sm">
+              <span className="text-[10px] uppercase tracking-wider text-[var(--ink-3)] mr-2">{c.rule.category}</span>
+              {c.rule.label}
+            </div>
+            <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ background:'var(--paper-2)' }}>
+              <div className="h-full rounded-full" style={{ width: `${(c.n/max)*100}%`, background:'var(--primary)' }}/>
+            </div>
+            <div className="w-12 text-right font-mono number-display text-sm">{c.n}</div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PatientRow({ scored, onClick, mlProb }) {
+  const p = scored.patient;
+  return (
+    <button onClick={onClick} className="w-full grid grid-cols-12 items-center gap-4 px-6 py-4 hover:bg-[var(--paper-2)] transition text-left">
+      <div className="col-span-4">
+        <div className="font-semibold">{p.nombre}</div>
+        <div className="text-xs text-[var(--ink-3)]">{p.id} · {p.edad}a · {p.sexo}</div>
+      </div>
+      <div className="col-span-3 text-xs text-[var(--ink-2)] truncate">
+        {p.patologias.length > 0 ? p.patologias.join(' · ') : <span className="text-[var(--ink-3)]">sin comorbilidades</span>}
+      </div>
+      <div className="col-span-2"><RiskBadge level={scored.level}/></div>
+      <div className="col-span-1 text-right">
+        <span className="font-display number-display text-xl font-semibold">{scored.score}</span>
+        <span className="text-[var(--ink-3)] text-xs">/{scored.maxScore}</span>
+      </div>
+      <div className="col-span-1 text-right">
+        {mlProb !== undefined ? (
+          <span className="font-mono number-display text-sm font-semibold text-[var(--ink-2)]" title="Probabilidad ML a 90 días">
+            {(mlProb * 100).toFixed(0)}<span className="text-[var(--ink-3)]">%</span>
+          </span>
+        ) : <span className="text-[var(--ink-3)] text-xs">—</span>}
+      </div>
+      <div className="col-span-1 text-right text-[var(--ink-3)]"><Icon.Arrow/></div>
+    </button>
+  );
+}
+
+// ============================================================
+// 8. LISTA DE PACIENTES (con filtros)
+// ============================================================
+
+function PatientsList({ scored, openPatient, mlProbs }) {
+  const [q, setQ] = useState('');
+  const [filter, setFilter] = useState('todos');
+  const [sort, setSort] = useState('score_desc');
+
+  const filtered = useMemo(() => {
+    let out = scored;
+    if (filter !== 'todos') out = out.filter(s => s.level === filter);
+    if (q.trim()) {
+      const t = q.toLowerCase();
+      out = out.filter(s => s.patient.nombre.toLowerCase().includes(t) || s.patient.id.toLowerCase().includes(t));
+    }
+    if (sort === 'score_desc') out = [...out].sort((a,b) => b.score - a.score);
+    if (sort === 'score_asc')  out = [...out].sort((a,b) => a.score - b.score);
+    if (sort === 'nombre')     out = [...out].sort((a,b) => a.patient.nombre.localeCompare(b.patient.nombre));
+    if (sort === 'ml_desc' && mlProbs) out = [...out].sort((a,b) => (mlProbs[b.patient.id]||0) - (mlProbs[a.patient.id]||0));
+    return out;
+  }, [scored, q, filter, sort, mlProbs]);
+
+  return (
+    <div className="fade-in">
+      <header className="mb-6">
+        <div className="text-[11px] uppercase tracking-widest text-[var(--ink-3)] font-semibold mb-1">Cohorte activa</div>
+        <h1 className="font-display text-4xl font-semibold tracking-tight">Pacientes</h1>
+      </header>
+
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        <div className="relative">
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--ink-3)]"><Icon.Search/></span>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por nombre o ID..."
+            className="pl-9 pr-4 py-2 border hairline rounded-md bg-white text-sm w-72"/>
+        </div>
+        <div className="flex border hairline rounded-md bg-white overflow-hidden">
+          {['todos','alto','medio','bajo'].map(f => (
+            <button key={f} onClick={() => setFilter(f)}
+              className={cls('px-3 py-2 text-sm capitalize transition', filter === f ? 'bg-[var(--primary)] text-[var(--paper)]' : 'hover:bg-[var(--paper-2)]')}>
+              {f}
+            </button>
+          ))}
+        </div>
+        <select value={sort} onChange={e => setSort(e.target.value)}
+          className="border hairline rounded-md bg-white text-sm px-3 py-2">
+          <option value="score_desc">Reglas (mayor primero)</option>
+          <option value="score_asc">Reglas (menor primero)</option>
+          <option value="ml_desc">Modelo ML (mayor primero)</option>
+          <option value="nombre">Nombre A→Z</option>
+        </select>
+        <span className="ml-auto text-sm text-[var(--ink-3)]">{filtered.length} resultados</span>
+      </div>
+
+      <div className="border hairline bg-white rounded-md overflow-hidden">
+        <div className="grid grid-cols-12 gap-4 px-6 py-3 text-[10px] uppercase tracking-widest text-[var(--ink-3)] font-semibold border-b hairline" style={{ background:'var(--paper-2)' }}>
+          <div className="col-span-4">Paciente</div>
+          <div className="col-span-3">Comorbilidades</div>
+          <div className="col-span-2">Nivel</div>
+          <div className="col-span-1 text-right">Reglas</div>
+          <div className="col-span-1 text-right">P(90d)</div>
+          <div className="col-span-1"></div>
+        </div>
+        <div className="divide-y hairline">
+          {filtered.length === 0 && <div className="px-6 py-12 text-center text-[var(--ink-3)]">Sin coincidencias.</div>}
+          {filtered.map(s => <PatientRow key={s.patient.id} scored={s} onClick={() => openPatient(s.patient.id)} mlProb={mlProbs && mlProbs[s.patient.id]}/>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// 9. FORMULARIO DE ALTA / EDICIÓN
+// ============================================================
+
+function PatientForm({ initial, onSave, onCancel, mode='nuevo', model }) {
+  const [p, setP] = useState(initial || {
+    id: 'P' + String(Math.floor(Math.random()*900)+100),
+    nombre:'', edad:65, sexo:'M', patologias:[], numFarmacos:0,
+    urgencias6m:false, hospitalizacion12m:false, adherencia:'alta',
+    diasUltimaRevision:90, sintomasActivos:false, constantesAnormales:false,
+    notas:'', decision:null, historial:[],
+  });
+
+  const togglePat = pat => setP({ ...p, patologias: p.patologias.includes(pat) ? p.patologias.filter(x => x !== pat) : [...p.patologias, pat] });
+  const upd = (k,v) => setP({ ...p, [k]: v });
+
+  // Vista previa en vivo: reglas + ML + NLP
+  const preview = useMemo(() => calculateRisk(p), [p]);
+  const previewProb = useMemo(() => model ? predictProb(model, vectorize(p)) : null, [p, model]);
+  const previewNotes = useMemo(() => analyzeNotes(p.notas), [p.notas]);
+
+  return (
+    <div className="fade-in">
+      <header className="mb-6">
+        <div className="text-[11px] uppercase tracking-widest text-[var(--ink-3)] font-semibold mb-1">{mode === 'nuevo' ? 'Alta de paciente' : 'Edición'}</div>
+        <h1 className="font-display text-4xl font-semibold tracking-tight">{p.nombre || 'Nuevo paciente'}</h1>
+      </header>
+
+      <div className="grid grid-cols-12 gap-6">
+        <div className="col-span-8 space-y-6">
+          {/* Datos básicos */}
+          <Section title="Datos básicos">
+            <div className="grid grid-cols-12 gap-4">
+              <div className="col-span-4"><Field label="ID interno"><input value={p.id} onChange={e => upd('id', e.target.value)} className="w-full border hairline rounded-md px-3 py-2 bg-white text-sm font-mono"/></Field></div>
+              <div className="col-span-8"><Field label="Nombre y apellidos"><input value={p.nombre} onChange={e => upd('nombre', e.target.value)} placeholder="Ej. María Casado Pérez" className="w-full border hairline rounded-md px-3 py-2 bg-white text-sm"/></Field></div>
+              <div className="col-span-4"><Field label="Edad"><input type="number" value={p.edad} onChange={e => upd('edad', +e.target.value)} className="w-full border hairline rounded-md px-3 py-2 bg-white text-sm"/></Field></div>
+              <div className="col-span-4"><Field label="Sexo"><select value={p.sexo} onChange={e => upd('sexo', e.target.value)} className="w-full border hairline rounded-md px-3 py-2 bg-white text-sm"><option>M</option><option>F</option><option>Otro</option></select></Field></div>
+              <div className="col-span-4"><Field label="Días desde última revisión"><input type="number" value={p.diasUltimaRevision} onChange={e => upd('diasUltimaRevision', +e.target.value)} className="w-full border hairline rounded-md px-3 py-2 bg-white text-sm"/></Field></div>
+            </div>
+          </Section>
+
+          <Section title="Comorbilidades activas">
+            <div className="flex flex-wrap gap-2">
+              {PATOLOGIAS_DISPONIBLES.map(pat => (
+                <button key={pat} type="button" onClick={() => togglePat(pat)}
+                  className={cls('px-3 py-1.5 rounded-full text-sm border transition',
+                    p.patologias.includes(pat) ? 'bg-[var(--primary)] text-[var(--paper)] border-[var(--primary)]' : 'bg-white hairline hover:bg-[var(--paper-2)]')}>
+                  {pat}
+                </button>
+              ))}
+            </div>
+          </Section>
+
+          <Section title="Tratamiento y manejo">
+            <div className="grid grid-cols-12 gap-4">
+              <div className="col-span-4"><Field label="Nº de fármacos activos"><input type="number" value={p.numFarmacos} onChange={e => upd('numFarmacos', +e.target.value)} className="w-full border hairline rounded-md px-3 py-2 bg-white text-sm"/></Field></div>
+              <div className="col-span-4"><Field label="Adherencia"><select value={p.adherencia} onChange={e => upd('adherencia', e.target.value)} className="w-full border hairline rounded-md px-3 py-2 bg-white text-sm"><option value="alta">Alta</option><option value="media">Media</option><option value="baja">Baja</option></select></Field></div>
+            </div>
+          </Section>
+
+          <Section title="Histórico asistencial y clínico">
+            <div className="grid grid-cols-2 gap-3">
+              <Toggle checked={p.urgencias6m}        onChange={v => upd('urgencias6m', v)}        label="Visita a urgencias en últimos 6 meses"/>
+              <Toggle checked={p.hospitalizacion12m} onChange={v => upd('hospitalizacion12m', v)} label="Hospitalización en últimos 12 meses"/>
+              <Toggle checked={p.sintomasActivos}    onChange={v => upd('sintomasActivos', v)}    label="Síntomas activos reportados"/>
+              <Toggle checked={p.constantesAnormales}onChange={v => upd('constantesAnormales', v)}label="Constantes/analítica fuera de rango"/>
+            </div>
+          </Section>
+
+          <Section title="Notas clínicas">
+            <textarea value={p.notas} onChange={e => upd('notas', e.target.value)} rows={3}
+              placeholder="Observaciones relevantes (síntomas, evolución, etc.). Términos como 'disnea', 'edemas' o 'estable' se detectan automáticamente."
+              className="w-full border hairline rounded-md px-3 py-2 bg-white text-sm"/>
+            {p.notas && previewNotes.hits.length > 0 && (
+              <div className="mt-3 p-3 rounded-md" style={{ background:'var(--paper-2)' }}>
+                <NotesAnalysis text={p.notas} analysis={previewNotes}/>
+              </div>
+            )}
+          </Section>
+
+          <div className="flex gap-3 pt-2">
+            <button onClick={() => onSave(p)} className="btn-primary px-5 py-2.5 rounded-md text-sm font-semibold">
+              {mode === 'nuevo' ? 'Crear paciente' : 'Guardar cambios'}
+            </button>
+            <button onClick={onCancel} className="btn-ghost px-5 py-2.5 rounded-md text-sm font-semibold border hairline">
+              Cancelar
+            </button>
+          </div>
+        </div>
+
+        {/* Vista previa en vivo */}
+        <aside className="col-span-4">
+          <div className="sticky top-6 border hairline bg-white rounded-md overflow-hidden">
+            <div className="px-5 py-4 border-b hairline" style={{ background:'var(--paper-2)' }}>
+              <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)]">Vista previa</div>
+              <div className="font-display text-lg font-semibold mt-0.5">Recálculo en tiempo real</div>
+            </div>
+            <div className="p-5">
+              <RiskBadge level={preview.level} size="lg"/>
+              <div className="mt-4">
+                <div className="text-[10px] uppercase tracking-widest text-[var(--ink-3)] font-semibold mb-1">Reglas</div>
+                <div className="font-display number-display text-5xl font-semibold leading-none">{preview.score}</div>
+                <div className="text-xs text-[var(--ink-3)] mt-1">de {preview.maxScore} puntos</div>
+                <div className="mt-2 h-1.5 rounded-full overflow-hidden" style={{ background:'var(--paper-2)' }}>
+                  <div className="h-full rounded-full transition-all duration-300" style={{ width: `${(preview.score/preview.maxScore)*100}%`, background: levelMeta(preview.level).dot }}/>
+                </div>
+              </div>
+
+              {previewProb !== null && (
+                <div className="mt-5 pt-4 border-t hairline">
+                  <div className="text-[10px] uppercase tracking-widest text-[var(--ink-3)] font-semibold mb-1 flex items-center gap-1.5">
+                    <Icon.Brain/> Modelo predictivo
+                  </div>
+                  <div className="flex items-baseline gap-1">
+                    <span className="font-display number-display text-4xl font-semibold">{(previewProb * 100).toFixed(1)}</span>
+                    <span className="text-sm text-[var(--ink-3)]">%</span>
+                    <span className="text-xs text-[var(--ink-3)] ml-1">a 90d</span>
+                  </div>
+                  <div className="mt-2 h-1.5 rounded-full overflow-hidden" style={{ background:'var(--paper-2)' }}>
+                    <div className="h-full rounded-full transition-all duration-300" style={{ width: `${previewProb*100}%`, background:'var(--high-fg)' }}/>
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-5 text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] mb-2">Reglas activas</div>
+              <div className="space-y-1.5 max-h-60 overflow-auto scrollbar pr-1">
+                {preview.factors.length === 0 && <div className="text-xs text-[var(--ink-3)]">Ninguna regla activa con los datos actuales.</div>}
+                {preview.factors.map(f => (
+                  <div key={f.id} className="flex items-center gap-2 text-xs">
+                    <span className="w-1 h-1 rounded-full bg-[var(--primary)]"/>
+                    <span className="flex-1">{f.label}</span>
+                    <span className="font-mono text-[var(--ink-3)]">+{f.weight}</span>
+                  </div>
+                ))}
+              </div>
+
+              {previewNotes.hits.length > 0 && (
+                <div className="mt-4 pt-4 border-t hairline">
+                  <div className="text-[10px] uppercase tracking-widest text-[var(--ink-3)] font-semibold mb-2 flex items-center gap-1.5">
+                    <Icon.Layers/> NLP de notas
+                  </div>
+                  <div className="text-xs">Score textual: <span className="font-mono font-semibold">{previewNotes.score}</span> · {previewNotes.hits.length} término(s)</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, children }) {
+  return (
+    <section className="border hairline bg-white rounded-md">
+      <div className="px-5 py-3 border-b hairline" style={{ background:'var(--paper-2)' }}>
+        <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)]">{title}</div>
+      </div>
+      <div className="p-5">{children}</div>
+    </section>
+  );
+}
+
+// ============================================================
+// 10. VISTA DETALLE DEL PACIENTE
+// ============================================================
+
+function PatientDetail({ scored, onBack, onEdit, onDecision, model, prob90, cohort, scoreFn, openPatient }) {
+  const p = scored.patient;
+  const meta = levelMeta(scored.level);
+  const rec = getRecommendation(scored.level, p);
+
+  // Agrupamos factores por categoría para mostrarlos pedagógicamente
+  const byCategory = useMemo(() => {
+    const groups = {};
+    scored.factors.forEach(f => { (groups[f.category] = groups[f.category] || []).push(f); });
+    return groups;
+  }, [scored]);
+
+  // Análisis NLP de las notas clínicas
+  const notesAnalysis = useMemo(() => analyzeNotes(p.notas), [p.notas]);
+
+  return (
+    <div className="fade-in">
+      <button onClick={onBack} className="text-sm text-[var(--ink-3)] hover:text-[var(--ink)] mb-4 flex items-center gap-1.5">
+        <span style={{ transform:'rotate(180deg)', display:'inline-flex' }}><Icon.Arrow/></span>
+        Volver al listado
+      </button>
+
+      <header className="grid grid-cols-12 gap-6 mb-8">
+        <div className="col-span-8">
+          <div className="text-[11px] uppercase tracking-widest text-[var(--ink-3)] font-semibold mb-1">Ficha del paciente · {p.id}</div>
+          <h1 className="font-display text-4xl font-semibold tracking-tight">{p.nombre}</h1>
+          <div className="text-[var(--ink-2)] mt-1">{p.edad} años · {p.sexo} · {p.patologias.length} comorbilidad(es)</div>
+
+          <div className="mt-4 flex items-center gap-3">
+            <RiskBadge level={scored.level} size="lg"/>
+            <button onClick={onEdit} className="text-sm flex items-center gap-1.5 px-3 py-1.5 border hairline rounded-md hover:bg-[var(--paper-2)]">
+              <Icon.Edit/> Editar datos
+            </button>
+          </div>
+        </div>
+
+        <div className="col-span-4 border hairline rounded-md p-5" style={{ background: meta.bg }}>
+          <div className="text-[10px] uppercase tracking-widest font-semibold" style={{ color: meta.fg }}>Puntuación de riesgo (reglas)</div>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="font-display number-display text-6xl font-semibold leading-none" style={{ color: meta.fg }}>{scored.score}</span>
+            <span className="text-sm" style={{ color: meta.fg, opacity:.7 }}>/ {scored.maxScore}</span>
+          </div>
+          <div className="mt-3 h-1.5 rounded-full overflow-hidden bg-white/60">
+            <div className="h-full rounded-full" style={{ width: `${(scored.score/scored.maxScore)*100}%`, background: meta.dot }}/>
+          </div>
+          <div className="mt-3 text-xs" style={{ color: meta.fg }}>
+            Umbrales: bajo &lt; {THRESHOLDS.medio} · medio &lt; {THRESHOLDS.alto} · alto ≥ {THRESHOLDS.alto}
+          </div>
+        </div>
+      </header>
+
+      <div className="grid grid-cols-12 gap-6">
+        {/* Factores explicativos */}
+        <section className="col-span-7 border hairline bg-white rounded-md">
+          <div className="px-6 py-4 border-b hairline">
+            <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)]">Factores que han influido</div>
+            <h2 className="font-display text-xl font-semibold mt-0.5">¿Por qué se ha clasificado así?</h2>
+          </div>
+          <div className="p-6 space-y-5">
+            {scored.factors.length === 0 && <div className="text-sm text-[var(--ink-3)]">No hay reglas activas. El paciente no presenta criterios de riesgo según el modelo de reglas.</div>}
+            {Object.entries(byCategory).map(([cat, fs]) => (
+              <div key={cat}>
+                <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] mb-2">{cat}</div>
+                <div className="space-y-1.5">
+                  {fs.map(f => (
+                    <div key={f.id} className="flex items-center gap-3 px-3 py-2 rounded-md" style={{ background:'var(--paper-2)' }}>
+                      <span className="text-[var(--sage)]"><Icon.Check/></span>
+                      <span className="flex-1 text-sm">{f.label}</span>
+                      <span className="font-mono text-sm font-semibold" style={{ color:'var(--high-fg)' }}>+{f.weight}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+
+            <div className="pt-4 border-t hairline text-xs text-[var(--ink-3)] flex items-start gap-2">
+              <span className="mt-0.5"><Icon.Info/></span>
+              <span>Sistema basado en reglas con pesos fijos. Cada factor presente suma su peso al total. Esto se complementa con el modelo predictivo (panel derecho).</span>
+            </div>
+          </div>
+        </section>
+
+        {/* Recomendación + decisión + ML */}
+        <aside className="col-span-5 space-y-6">
+          <MLPredictionPanel scored={scored} model={model} prob90={prob90 ?? 0}/>
+
+          <section className="border hairline bg-white rounded-md">
+            <div className="px-5 py-4 border-b hairline">
+              <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)]">Recomendación del sistema</div>
+              <h2 className="font-display text-lg font-semibold mt-0.5">Próxima acción sugerida</h2>
+            </div>
+            <div className="p-5">
+              <div className="flex items-start gap-3">
+                <span className="mt-0.5 p-2 rounded-md text-[var(--paper)]" style={{ background: meta.dot }}>
+                  {rec.icono === 'urgent' ? <Icon.Bolt/> : rec.icono === 'phone' ? <Icon.Phone/> : <Icon.Cal/>}
+                </span>
+                <div className="flex-1">
+                  <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)]">{rec.tag}</div>
+                  <div className="font-semibold text-base mt-0.5">{rec.accion}</div>
+                </div>
+              </div>
+              <p className="text-sm text-[var(--ink-2)] mt-4 leading-relaxed">{rec.detalle}</p>
+
+              {p.notas && (
+                <div className="mt-5 pt-4 border-t hairline">
+                  <NotesAnalysis text={p.notas} analysis={notesAnalysis}/>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <DecisionPanel patient={p} recommendation={rec} onDecision={onDecision}/>
+
+          <SimilarPatientsPanel target={p} cohort={cohort} scoreFn={scoreFn} openPatient={openPatient}/>
+        </aside>
+      </div>
+
+      {p.historial && p.historial.length > 0 && (
+        <section className="mt-8 border hairline bg-white rounded-md">
+          <div className="px-6 py-4 border-b hairline">
+            <h2 className="font-display text-lg font-semibold">Historial de decisiones</h2>
+          </div>
+          <ul className="divide-y hairline">
+            {p.historial.slice().reverse().map((h, i) => (
+              <li key={i} className="px-6 py-3 flex items-center gap-4 text-sm">
+                <DecisionTag tipo={h.tipo}/>
+                <span className="flex-1">{h.detalle}</span>
+                <span className="text-xs text-[var(--ink-3)] font-mono">{fmtDate(h.ts)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function DecisionTag({ tipo }) {
+  const map = {
+    confirmada:  { label:'Confirmada',  bg:'var(--low-bg)',  fg:'var(--low-fg)' },
+    modificada:  { label:'Modificada',  bg:'var(--med-bg)',  fg:'var(--med-fg)' },
+    descartada:  { label:'Descartada',  bg:'var(--high-bg)', fg:'var(--high-fg)' },
+  };
+  const m = map[tipo] || map.modificada;
+  return <span className="pill px-2 py-1 rounded" style={{ background: m.bg, color: m.fg }}>{m.label}</span>;
+}
+
+function DecisionPanel({ patient, recommendation, onDecision }) {
+  const [mode, setMode] = useState(null); // null | 'modificar' | 'descartar'
+  const [accion, setAccion] = useState('');
+  const [motivo, setMotivo] = useState('');
+
+  const confirm = () => onDecision(patient.id, { tipo:'confirmada', detalle: `Confirma: ${recommendation.accion}`, ts: Date.now() });
+  const submitMod = () => {
+    if (!accion.trim()) return;
+    onDecision(patient.id, { tipo:'modificada', detalle:`Acción definida: ${accion}${motivo ? ' · '+motivo : ''}`, ts: Date.now() });
+    setMode(null); setAccion(''); setMotivo('');
+  };
+  const submitDis = () => {
+    onDecision(patient.id, { tipo:'descartada', detalle:`Descartada${motivo ? ': '+motivo : ''}`, ts: Date.now() });
+    setMode(null); setMotivo('');
+  };
+
+  return (
+    <section className="border hairline bg-white rounded-md">
+      <div className="px-5 py-4 border-b hairline">
+        <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)]">Decisión profesional</div>
+        <h2 className="font-display text-lg font-semibold mt-0.5">Registrar criterio clínico</h2>
+      </div>
+      <div className="p-5">
+        {patient.decision && (
+          <div className="mb-4 p-3 rounded-md flex items-start gap-2" style={{ background:'var(--paper-2)' }}>
+            <DecisionTag tipo={patient.decision.tipo}/>
+            <div className="flex-1 text-sm">
+              <div>{patient.decision.detalle}</div>
+              <div className="text-xs text-[var(--ink-3)] mt-0.5">{fmtDate(patient.decision.ts)}</div>
+            </div>
+          </div>
+        )}
+
+        {mode === null && (
+          <div className="space-y-2">
+            <button onClick={confirm} className="w-full btn-primary py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2">
+              <Icon.Check/> Confirmar recomendación
+            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <button onClick={() => setMode('modificar')} className="py-2.5 rounded-md text-sm font-semibold border hairline btn-ghost flex items-center justify-center gap-2">
+                <Icon.Edit/> Modificar
+              </button>
+              <button onClick={() => setMode('descartar')} className="py-2.5 rounded-md text-sm font-semibold border hairline btn-ghost flex items-center justify-center gap-2" style={{ color:'var(--high-fg)' }}>
+                <Icon.X/> Descartar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {mode === 'modificar' && (
+          <div className="space-y-3">
+            <Field label="Acción definida por el clínico">
+              <input value={accion} onChange={e => setAccion(e.target.value)} placeholder="Ej. Cita presencial mañana 09:00"
+                className="w-full border hairline rounded-md px-3 py-2 bg-white text-sm"/>
+            </Field>
+            <Field label="Motivo (opcional)">
+              <input value={motivo} onChange={e => setMotivo(e.target.value)} placeholder="Justificación clínica"
+                className="w-full border hairline rounded-md px-3 py-2 bg-white text-sm"/>
+            </Field>
+            <div className="flex gap-2">
+              <button onClick={submitMod} className="btn-primary px-4 py-2 rounded-md text-sm font-semibold">Guardar</button>
+              <button onClick={() => setMode(null)} className="px-4 py-2 rounded-md text-sm font-semibold btn-ghost border hairline">Cancelar</button>
+            </div>
+          </div>
+        )}
+
+        {mode === 'descartar' && (
+          <div className="space-y-3">
+            <Field label="Motivo del descarte">
+              <textarea value={motivo} onChange={e => setMotivo(e.target.value)} rows={2} placeholder="Ej. Paciente ya valorado en consulta el día previo"
+                className="w-full border hairline rounded-md px-3 py-2 bg-white text-sm"/>
+            </Field>
+            <div className="flex gap-2">
+              <button onClick={submitDis} className="px-4 py-2 rounded-md text-sm font-semibold text-white" style={{ background:'var(--high-fg)' }}>Descartar</button>
+              <button onClick={() => setMode(null)} className="px-4 py-2 rounded-md text-sm font-semibold btn-ghost border hairline">Cancelar</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ============================================================
+// 10.bis COMPONENTES DE IA — Visualización del modelo y NLP
+// ============================================================
+
+function MLPredictionPanel({ scored, model, prob90 }) {
+  if (!model) {
+    return (
+      <section className="border hairline bg-white rounded-md">
+        <div className="px-5 py-4 border-b hairline">
+          <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)]">Modelo predictivo</div>
+        </div>
+        <div className="p-5 text-sm text-[var(--ink-3)] flex items-center gap-2"><Icon.Spark/> Entrenando modelo…</div>
+      </section>
+    );
+  }
+
+  // Acuerdo entre reglas y modelo
+  const ruleLevel = scored.level;
+  const mlLevel = prob90 >= 0.5 ? 'alto' : prob90 >= 0.2 ? 'medio' : 'bajo';
+  const concuerda = ruleLevel === mlLevel;
+  const meta = levelMeta(mlLevel);
+
+  return (
+    <section className="border hairline bg-white rounded-md overflow-hidden">
+      <div className="px-5 py-4 border-b hairline flex items-center justify-between" style={{ background:'var(--paper-2)' }}>
+        <div>
+          <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] flex items-center gap-1.5">
+            <Icon.Brain/> Modelo predictivo (regresión logística)
+          </div>
+          <div className="font-display text-base font-semibold mt-0.5">Probabilidad estimada de descompensación</div>
+        </div>
+      </div>
+      <div className="p-5">
+        <div className="flex items-baseline gap-2">
+          <span className="font-display number-display text-5xl font-semibold" style={{ color: meta.fg }}>{(prob90 * 100).toFixed(1)}</span>
+          <span className="text-lg" style={{ color: meta.fg, opacity: .6 }}>%</span>
+          <span className="text-xs text-[var(--ink-3)] ml-2">a 90 días</span>
+        </div>
+
+        <div className="mt-3 h-1.5 rounded-full overflow-hidden" style={{ background:'var(--paper-2)' }}>
+          <div className="h-full rounded-full transition-all" style={{ width: `${prob90 * 100}%`, background: meta.dot }}/>
+        </div>
+
+        <TemporalRiskCurve prob90={prob90}/>
+
+        <div className="mt-4 pt-4 border-t hairline">
+          <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] mb-2">Comparativa con sistema de reglas</div>
+          <div className="flex items-center gap-2 text-xs">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[var(--ink-3)]">Reglas:</span>
+              <RiskBadge level={ruleLevel}/>
+            </div>
+            <span className="text-[var(--ink-3)]">·</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[var(--ink-3)]">Modelo:</span>
+              <RiskBadge level={mlLevel}/>
+            </div>
+          </div>
+          <div className={cls('mt-2 text-xs flex items-center gap-1.5', concuerda ? 'text-[var(--sage)]' : 'text-[var(--accent-2)]')}>
+            {concuerda
+              ? <><Icon.Check/> Ambos sistemas coinciden — confianza alta</>
+              : <><Icon.Info/> Discrepancia entre sistemas — revisar criterios</>}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TemporalRiskCurve({ prob90 }) {
+  const days = [7, 30, 60, 90, 180, 365];
+  const points = days.map(d => ({ d, p: temporalProbability(prob90, d) }));
+  const w = 280, h = 90, padX = 20, padY = 12;
+  const xScale = i => padX + (i / (points.length - 1)) * (w - 2 * padX);
+  const yScale = p => h - padY - p * (h - 2 * padY);
+  const path = points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${xScale(i)} ${yScale(pt.p)}`).join(' ');
+  const area = path + ` L ${xScale(points.length - 1)} ${h - padY} L ${xScale(0)} ${h - padY} Z`;
+
+  return (
+    <div className="mt-5">
+      <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] mb-2">Probabilidad acumulada en el tiempo</div>
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-auto">
+        <path d={area} fill="var(--high-bg)" opacity="0.6"/>
+        <path d={path} fill="none" stroke="var(--high-fg)" strokeWidth="1.5"/>
+        {points.map((pt, i) => (
+          <g key={i}>
+            <circle cx={xScale(i)} cy={yScale(pt.p)} r="2.5" fill="var(--high-fg)"/>
+            <text x={xScale(i)} y={h - 2} textAnchor="middle" style={{ fontSize:9, fill:'var(--ink-3)' }}>{pt.d}d</text>
+            <text x={xScale(i)} y={yScale(pt.p) - 6} textAnchor="middle" style={{ fontSize:9, fill:'var(--ink-2)', fontWeight:600 }}>{(pt.p*100).toFixed(0)}%</text>
+          </g>
+        ))}
+      </svg>
+      <div className="text-[10px] text-[var(--ink-3)] mt-1">Modelo de hazard exponencial constante calibrado a partir de P(90d)</div>
+    </div>
+  );
+}
+
+function NotesAnalysis({ text, analysis }) {
+  if (!text) return null;
+
+  // Reconstruir texto con highlights
+  const segments = [];
+  let cursor = 0;
+  analysis.hits.forEach(hit => {
+    if (hit.start > cursor) segments.push({ text: text.slice(cursor, hit.start), highlight: null });
+    segments.push({ text: text.slice(hit.start, hit.end), highlight: hit });
+    cursor = hit.end;
+  });
+  if (cursor < text.length) segments.push({ text: text.slice(cursor), highlight: null });
+
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] mb-2 flex items-center gap-1.5">
+        <Icon.Layers/> Análisis automático de notas (NLP)
+      </div>
+      <p className="text-sm text-[var(--ink-2)] leading-relaxed italic">
+        {segments.map((s, i) => s.highlight ? (
+          <span key={i} className="px-1 rounded font-semibold not-italic" style={{ background: CLINICAL_TERMS[s.highlight.severity].bg, color: CLINICAL_TERMS[s.highlight.severity].color }} title={`Severidad ${s.highlight.severity} (peso ${s.highlight.weight > 0 ? '+' : ''}${s.highlight.weight})`}>
+            {s.text}
+          </span>
+        ) : <span key={i}>{s.text}</span>)}
+      </p>
+      {analysis.hits.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+          <span className="text-[var(--ink-3)]">Términos detectados:</span>
+          {analysis.hits.map((h, i) => (
+            <span key={i} className="font-mono px-1.5 py-0.5 rounded" style={{ background: CLINICAL_TERMS[h.severity].bg, color: CLINICAL_TERMS[h.severity].color }}>
+              {h.term}
+            </span>
+          ))}
+          <span className="text-[var(--ink-3)] ml-1">· Score NLP: <span className="font-mono font-semibold text-[var(--ink)]">{analysis.score}</span></span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SimilarPatientsPanel({ target, cohort, scoreFn, openPatient }) {
+  const similar = useMemo(() => findSimilarPatients(target, cohort, 3), [target, cohort]);
+  if (similar.length === 0) return null;
+
+  return (
+    <section className="border hairline bg-white rounded-md">
+      <div className="px-5 py-4 border-b hairline">
+        <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] flex items-center gap-1.5">
+          <Icon.Users/> Pacientes similares en la cohorte
+        </div>
+        <div className="font-display text-base font-semibold mt-0.5">3 vecinos más próximos (kNN)</div>
+      </div>
+      <div className="divide-y hairline">
+        {similar.map(({ patient, distance }) => {
+          const s = scoreFn(patient);
+          return (
+            <button key={patient.id} onClick={() => openPatient(patient.id)}
+              className="w-full px-5 py-3 text-left hover:bg-[var(--paper-2)] transition flex items-center gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold text-sm truncate">{patient.nombre}</div>
+                <div className="text-xs text-[var(--ink-3)]">{patient.id} · {patient.edad}a · dist. <span className="font-mono">{distance.toFixed(2)}</span></div>
+              </div>
+              <RiskBadge level={s.level}/>
+              {patient.decision && <DecisionTag tipo={patient.decision.tipo}/>}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// ============================================================
+// 10.ter VISTA "Acerca del modelo" — Transparencia algorítmica
+// ============================================================
+
+function AboutModel({ model, originalModel, dataset, auc, training, adaptations, onResetModel }) {
+  if (!model) {
+    return (
+      <div className="fade-in">
+        <h1 className="font-display text-4xl font-semibold tracking-tight mb-2">Acerca del modelo</h1>
+        <div className="text-[var(--ink-3)] flex items-center gap-2 mt-4"><Icon.Spark/> Entrenando…</div>
+      </div>
+    );
+  }
+
+  // Diff de pesos: cuánto se ha movido cada coeficiente respecto al original
+  const drift = useMemo(() => {
+    if (!originalModel) return [];
+    return model.w.map((wj, i) => ({
+      name: FEATURE_NAMES[i],
+      current: wj,
+      original: originalModel.w[i],
+      delta: wj - originalModel.w[i],
+    })).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  }, [model, originalModel]);
+
+  const totalDrift = useMemo(() => {
+    if (!originalModel) return 0;
+    let sum = 0;
+    for (let i = 0; i < model.w.length; i++) sum += Math.abs(model.w[i] - originalModel.w[i]);
+    sum += Math.abs(model.b - originalModel.b);
+    return sum;
+  }, [model, originalModel]);
+
+  const coeffs = model.w
+    .map((w, i) => ({ name: FEATURE_NAMES[i], w }))
+    .sort((a, b) => Math.abs(b.w) - Math.abs(a.w));
+  const maxAbs = Math.max(...coeffs.map(c => Math.abs(c.w)));
+
+  const hasAdaptations = adaptations && adaptations.length > 0;
+  const positiveAdapts = (adaptations || []).filter(a => a.y === 1).length;
+  const negativeAdapts = (adaptations || []).filter(a => a.y === 0).length;
+
+  const handleReset = () => {
+    if (window.confirm('¿Restablecer el modelo a sus pesos originales? Se descartarán todas las adaptaciones aprendidas de las decisiones humanas.')) {
+      onResetModel();
+    }
+  };
+
+  return (
+    <div className="fade-in">
+      <header className="mb-8 flex items-end justify-between gap-6">
+        <div>
+          <div className="text-[11px] uppercase tracking-widest text-[var(--ink-3)] font-semibold mb-1">Transparencia algorítmica</div>
+          <h1 className="font-display text-4xl font-semibold tracking-tight">Acerca del modelo</h1>
+          <p className="text-[var(--ink-2)] mt-2 max-w-2xl">El sistema combina dos motores: un sistema basado en reglas (auditable) y un modelo de regresión logística entrenado en el navegador, que además se adapta de forma incremental con cada decisión humana clara.</p>
+        </div>
+        {hasAdaptations && (
+          <button onClick={handleReset} className="px-3 py-2 text-xs font-semibold border hairline rounded-md hover:bg-[var(--paper-2)] text-[var(--high-fg)] flex items-center gap-1.5 shrink-0">
+            <Icon.X/> Restablecer modelo
+          </button>
+        )}
+      </header>
+
+      <div className="grid grid-cols-12 gap-4 mb-8">
+        <KpiCard col="col-span-3" label="Algoritmo"        value="LogReg" accent="var(--primary)" sub="con regularización L2"/>
+        <KpiCard col="col-span-3" label="Muestras entren." value={dataset.length} accent="var(--ink)" sub="pacientes sintéticos"/>
+        <KpiCard col="col-span-3" label="AUC ROC"          value={auc.toFixed(3)} accent="var(--sage)" sub="poder discriminativo"/>
+        <KpiCard col="col-span-3" label="Adaptaciones"     value={adaptations ? adaptations.length : 0} accent={hasAdaptations ? 'var(--accent-2)' : 'var(--ink-3)'} sub="updates online aplicados"/>
+      </div>
+
+      {/* Adaptaciones online */}
+      {hasAdaptations && (
+        <section className="mb-8 border hairline rounded-md bg-white">
+          <div className="px-6 py-4 border-b hairline">
+            <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] flex items-center gap-1.5">
+              <Icon.Pulse/> Aprendizaje online
+            </div>
+            <h2 className="font-display text-xl font-semibold mt-0.5">Cómo ha cambiado el modelo con las decisiones</h2>
+            <div className="text-xs text-[var(--ink-3)] mt-1">
+              {positiveAdapts} señal(es) positiva(s) · {negativeAdapts} negativa(s) · drift acumulado <span className="font-mono font-semibold text-[var(--ink)]">{totalDrift.toFixed(3)}</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2">
+            {/* Drift de coeficientes */}
+            <div className="p-6 border-r hairline">
+              <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] mb-3">Coeficientes que más han cambiado</div>
+              <div className="space-y-2">
+                {drift.slice(0, 7).map(d => (
+                  <div key={d.name} className="flex items-center gap-3 text-xs">
+                    <div className="w-40 text-[var(--ink-2)] truncate">{d.name}</div>
+                    <div className="flex-1 font-mono">
+                      <span className="text-[var(--ink-3)]">{d.original.toFixed(3)}</span>
+                      <span className="mx-1 text-[var(--ink-3)]">→</span>
+                      <span className="font-semibold">{d.current.toFixed(3)}</span>
+                    </div>
+                    <span className={cls('font-mono font-semibold w-16 text-right',
+                      Math.abs(d.delta) < 0.001 ? 'text-[var(--ink-3)]' :
+                      d.delta > 0 ? 'text-[var(--high-fg)]' : 'text-[var(--sage)]')}>
+                      {d.delta >= 0 ? '+' : ''}{d.delta.toFixed(3)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Histórico de adaptaciones */}
+            <div className="p-6">
+              <div className="text-[10px] uppercase tracking-widest font-semibold text-[var(--ink-3)] mb-3">Histórico de feedback</div>
+              <div className="space-y-1.5 max-h-64 overflow-auto scrollbar pr-1">
+                {[...adaptations].reverse().map((a, i) => (
+                  <div key={i} className="flex items-center gap-2 text-xs px-2 py-1.5 rounded" style={{ background:'var(--paper-2)' }}>
+                    <span className={cls('w-1.5 h-1.5 rounded-full shrink-0', a.y === 1 ? 'bg-[var(--high-fg)]' : 'bg-[var(--sage)]')}/>
+                    <span className="font-mono text-[10px] text-[var(--ink-3)]">y={a.y}</span>
+                    <span className="flex-1 truncate">{a.patientName}</span>
+                    <DecisionTag tipo={a.decisionType}/>
+                    <span className="text-[10px] text-[var(--ink-3)] font-mono shrink-0">{fmtDate(a.ts)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {!hasAdaptations && (
+        <section className="mb-8 border hairline rounded-md bg-[var(--paper-2)] p-6 text-sm text-[var(--ink-2)]">
+          <div className="flex items-start gap-3">
+            <Icon.Pulse/>
+            <div>
+              <div className="font-semibold text-[var(--ink)] mb-1">Aprendizaje online activado</div>
+              <div className="text-xs">El modelo se adapta automáticamente con cada decisión confirmada o descartada en pacientes de riesgo alto/bajo. Aún no hay ninguna adaptación registrada — registre alguna decisión para verlo en acción.</div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      <div className="grid grid-cols-12 gap-6">
+        <section className="col-span-7 border hairline bg-white rounded-md">
+          <div className="px-6 py-4 border-b hairline">
+            <h2 className="font-display text-xl font-semibold">Coeficientes actuales</h2>
+            <div className="text-xs text-[var(--ink-3)] mt-0.5">Magnitud y signo del impacto de cada variable en el log-odds</div>
+          </div>
+          <div className="p-6 space-y-2">
+            {coeffs.map(c => (
+              <div key={c.name} className="flex items-center gap-3">
+                <div className="w-48 text-xs text-[var(--ink-2)]">{c.name}</div>
+                <div className="flex-1 relative h-5">
+                  <div className="absolute inset-y-0 left-1/2 w-px bg-[var(--line-2)]"/>
+                  <div className="absolute inset-y-0.5 rounded"
+                       style={{
+                         left: c.w >= 0 ? '50%' : `${50 - (Math.abs(c.w)/maxAbs)*45}%`,
+                         width: `${(Math.abs(c.w)/maxAbs)*45}%`,
+                         background: c.w >= 0 ? 'var(--high-fg)' : 'var(--sage)',
+                         opacity: 0.85,
+                       }}/>
+                </div>
+                <div className="w-16 text-right font-mono number-display text-xs">{c.w >= 0 ? '+' : ''}{c.w.toFixed(3)}</div>
+              </div>
+            ))}
+            <div className="pt-2 mt-2 border-t hairline flex items-center gap-3">
+              <div className="w-48 text-xs text-[var(--ink-3)]">Intercept (b)</div>
+              <div className="flex-1"></div>
+              <div className="w-16 text-right font-mono number-display text-xs">{model.b.toFixed(3)}</div>
+            </div>
+          </div>
+        </section>
+
+        <section className="col-span-5 border hairline bg-white rounded-md">
+          <div className="px-6 py-4 border-b hairline">
+            <h2 className="font-display text-xl font-semibold">Curva de pérdida</h2>
+            <div className="text-xs text-[var(--ink-3)] mt-0.5">Cross-entropy media por época durante el entrenamiento offline</div>
+          </div>
+          <div className="p-6">
+            <LossCurve history={originalModel ? originalModel.lossHistory : model.lossHistory}/>
+          </div>
+        </section>
+      </div>
+
+      <section className="mt-6 border hairline bg-[var(--paper-2)] rounded-md p-6 text-sm text-[var(--ink-2)] leading-relaxed">
+        <div className="font-display text-lg font-semibold text-[var(--ink)] mb-2">Limitaciones honestas</div>
+        <ul className="space-y-1.5 list-disc pl-5">
+          <li>El dataset de entrenamiento es <strong>sintético</strong>, generado con una distribución conocida. Las métricas son optimistas porque el modelo aprende la misma función que generó los datos.</li>
+          <li>El aprendizaje online actualiza pesos con SGD <code className="font-mono text-xs">(lr=0.02)</code> a partir de señales implícitas (decisiones humanas), no de outcomes clínicos reales. En producción, idealmente se reentrenaría periódicamente con resultados verificados.</li>
+          <li>Solo se actualizan los pesos cuando la decisión es interpretable sin ambigüedad: <em>confirmada</em> en alto/bajo o <em>descartada</em> en alto. <em>Modificada</em> y nivel <em>medio</em> se ignoran para evitar ruido.</li>
+          <li>La probabilidad temporal asume un hazard constante, una simplificación habitual que no captura aceleraciones del riesgo.</li>
+        </ul>
+      </section>
+    </div>
+  );
+}
+
+function LossCurve({ history }) {
+  if (!history || history.length === 0) return null;
+  const w = 280, h = 140, padX = 20, padY = 14;
+  const min = Math.min(...history), max = Math.max(...history);
+  const range = max - min || 1;
+  const x = i => padX + (i / (history.length - 1)) * (w - 2 * padX);
+  const y = v => h - padY - ((v - min) / range) * (h - 2 * padY);
+  const path = history.map((v, i) => `${i === 0 ? 'M' : 'L'} ${x(i)} ${y(v)}`).join(' ');
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-auto">
+      <line x1={padX} y1={h - padY} x2={w - padX} y2={h - padY} stroke="var(--line)"/>
+      <line x1={padX} y1={padY} x2={padX} y2={h - padY} stroke="var(--line)"/>
+      <path d={path} fill="none" stroke="var(--primary)" strokeWidth="1.5"/>
+      <text x={padX} y={padY - 2} style={{ fontSize:9, fill:'var(--ink-3)' }}>{max.toFixed(3)}</text>
+      <text x={padX} y={h - 2} style={{ fontSize:9, fill:'var(--ink-3)' }}>{min.toFixed(3)}</text>
+      <text x={w - padX} y={h - 2} textAnchor="end" style={{ fontSize:9, fill:'var(--ink-3)' }}>época {history.length}</text>
+    </svg>
+  );
+}
+
+// ============================================================
+// 11. APP RAÍZ
+// ============================================================
+
+function App() {
+  // === Persistencia: cargar pacientes desde localStorage al iniciar ===
+  // useState con función para que la lectura solo ocurra una vez.
+  const [patients, setPatients] = useState(() => Storage.loadPatients() || SEED_PATIENTS);
+  const [view, setView] = useState('dashboard');
+  const [activeId, setActiveId] = useState(null);
+
+  // Toast efímero para feedback visual de adaptaciones del modelo
+  const [lastAdaptation, setLastAdaptation] = useState(null);
+
+  // === Persistencia: guardar pacientes en cada cambio ===
+  useEffect(() => { Storage.savePatients(patients); }, [patients]);
+
+  // === Estado del modelo ML ===
+  // - originalModel: snapshot del modelo recién entrenado (referencia)
+  // - model: modelo actual (puede haber recibido updates online)
+  // - adaptations: log de updates aplicados; se persiste y se hace replay
+  const [mlState, setMlState] = useState({
+    model: null, originalModel: null, dataset: null, auc: null, adaptations: [],
+  });
+
+  // === Entrenamiento + replay de adaptaciones al cargar ===
+  useEffect(() => {
+    const id = setTimeout(() => {
+      const dataset = generateSyntheticDataset(500);
+      const original = trainLogisticRegression(dataset, { epochs: 250, lr: 0.15, lambda: 0.005 });
+      const auc = computeAUC(original, dataset);
+
+      // Replay: aplicar las adaptaciones guardadas en orden cronológico
+      const savedAdaptations = Storage.loadAdaptations();
+      let adapted = { ...original, w: [...original.w] };
+      savedAdaptations.forEach(a => { adapted = onlineUpdate(adapted, a.x, a.y); });
+
+      setMlState({
+        model: adapted,
+        originalModel: original,
+        dataset, auc,
+        adaptations: savedAdaptations,
+      });
+    }, 50);
+    return () => clearTimeout(id);
+  }, []);
+
+  const scored = useMemo(
+    () => patients.map(p => ({ patient: p, ...calculateRisk(p) })),
+    [patients]
+  );
+
+  const scoreFn = (p) => ({ patient: p, ...calculateRisk(p) });
+
+  const mlProbs = useMemo(() => {
+    if (!mlState.model) return {};
+    const out = {};
+    patients.forEach(p => { out[p.id] = predictProb(mlState.model, vectorize(p)); });
+    return out;
+  }, [mlState.model, patients]);
+
+  const counts = { total: patients.length };
+
+  const openPatient = (id) => { setActiveId(id); setView('detail'); };
+  const editPatient = (id) => { setActiveId(id); setView('edit'); };
+
+  const upsertPatient = (p) => {
+    setPatients(prev => {
+      const exists = prev.find(x => x.id === p.id);
+      if (exists) return prev.map(x => x.id === p.id ? p : x);
+      return [...prev, p];
+    });
+    setActiveId(p.id);
+    setView('detail');
+  };
+
+  // === Registrar decisión + posible online update del modelo ===
+  const recordDecision = (id, decision) => {
+    setPatients(prev => prev.map(p => {
+      if (p.id !== id) return p;
+      const historial = [...(p.historial || []), decision];
+      return { ...p, decision, historial };
+    }));
+
+    // Derivar outcome implícito y aplicar SGD si hay señal clara
+    const patient = patients.find(p => p.id === id);
+    if (!patient || !mlState.model) return;
+    const ruleLevel = calculateRisk(patient).level;
+    const yImplicit = deriveImplicitOutcome(decision.tipo, ruleLevel);
+    if (yImplicit === null) return;
+
+    const x = vectorize(patient);
+    const adaptation = {
+      ts: decision.ts, patientId: id, patientName: patient.nombre,
+      x, y: yImplicit, decisionType: decision.tipo, ruleLevel,
+    };
+
+    setMlState(prev => {
+      if (!prev.model) return prev;
+      const updated = onlineUpdate(prev.model, x, yImplicit);
+      const newAdaptations = [...prev.adaptations, adaptation];
+      Storage.saveAdaptations(newAdaptations);
+      return { ...prev, model: updated, adaptations: newAdaptations };
+    });
+
+    // Toast efímero
+    setLastAdaptation(adaptation);
+    setTimeout(() => setLastAdaptation(curr => curr === adaptation ? null : curr), 4000);
+  };
+
+  // === Reset del modelo (vuelve al original) ===
+  const resetModel = () => {
+    setMlState(prev => {
+      if (!prev.originalModel) return prev;
+      Storage.saveAdaptations([]);
+      return {
+        ...prev,
+        model: { ...prev.originalModel, w: [...prev.originalModel.w] },
+        adaptations: [],
+      };
+    });
+  };
+
+  // === Reset completo (datos + modelo) ===
+  const resetAll = () => {
+    Storage.clearAll();
+    setPatients(SEED_PATIENTS);
+    resetModel();
+    setActiveId(null);
+    setView('dashboard');
+  };
+
+  const activeScored = activeId ? scored.find(s => s.patient.id === activeId) : null;
+
+  return (
+    <div className="min-h-screen flex grain">
+      <Sidebar view={view} setView={setView} counts={counts} onReset={resetAll}/>
+      <main className="flex-1 overflow-auto scrollbar relative">
+        <div className="max-w-7xl mx-auto px-10 py-10">
+          {view === 'dashboard' && <Dashboard patients={patients} scored={scored} setView={setView} openPatient={openPatient} mlProbs={mlProbs} adaptations={mlState.adaptations}/>}
+          {view === 'patients'  && <PatientsList scored={scored} openPatient={openPatient} mlProbs={mlProbs}/>}
+          {view === 'new'       && <PatientForm onSave={upsertPatient} onCancel={() => setView('dashboard')} mode="nuevo" model={mlState.model}/>}
+          {view === 'edit' && activeScored && <PatientForm initial={activeScored.patient} onSave={upsertPatient} onCancel={() => setView('detail')} mode="edicion" model={mlState.model}/>}
+          {view === 'detail' && activeScored && (
+            <PatientDetail
+              scored={activeScored}
+              onBack={() => setView('patients')}
+              onEdit={() => editPatient(activeScored.patient.id)}
+              onDecision={recordDecision}
+              model={mlState.model}
+              prob90={mlProbs[activeScored.patient.id]}
+              cohort={patients}
+              scoreFn={scoreFn}
+              openPatient={openPatient}
+            />
+          )}
+          {view === 'model' && (
+            <AboutModel
+              model={mlState.model}
+              originalModel={mlState.originalModel}
+              dataset={mlState.dataset || []}
+              auc={mlState.auc || 0.5}
+              training={{ epochs: 250 }}
+              adaptations={mlState.adaptations}
+              onResetModel={resetModel}
+            />
+          )}
+        </div>
+        <footer className="border-t hairline px-10 py-6 text-xs text-[var(--ink-3)] flex items-center justify-between">
+          <span>Lince — prototipo de demostración. Datos sintéticos, sin información real de pacientes.</span>
+          <span className="font-mono">v0.3 · Reglas + ML adaptativo · Persistencia local</span>
+        </footer>
+        {lastAdaptation && <AdaptationToast adaptation={lastAdaptation}/>}
+      </main>
+    </div>
+  );
+}
+
+function AdaptationToast({ adaptation }) {
+  return (
+    <div className="fixed bottom-6 right-6 z-50 fade-in border hairline-strong rounded-md shadow-lg overflow-hidden" style={{ background:'var(--paper)', maxWidth: 360 }}>
+      <div className="px-4 py-3 border-b hairline flex items-center gap-2" style={{ background:'var(--primary)', color:'var(--paper)' }}>
+        <Icon.Brain/>
+        <span className="text-sm font-semibold">Modelo actualizado</span>
+      </div>
+      <div className="px-4 py-3 text-sm">
+        <div>El modelo ha aprendido de su decisión sobre <span className="font-semibold">{adaptation.patientName}</span>.</div>
+        <div className="text-xs text-[var(--ink-3)] mt-1 flex items-center gap-2">
+          <DecisionTag tipo={adaptation.decisionType}/>
+          <span>· señal y={adaptation.y}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
